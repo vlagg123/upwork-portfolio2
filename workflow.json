@@ -1,0 +1,107 @@
+{
+  "name": "Lead Intake: Email -> GPT -> Sheets + Slack",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": { "item": [{ "mode": "everyMinute" }] },
+        "simple": false,
+        "filters": {},
+        "options": {}
+      },
+      "id": "n1",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'gpt-4o-mini', temperature: 0, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'You extract structured lead data from inbound emails. Return ONLY a JSON object with keys: name, company, email, intent, budget, priority, summary. priority must be one of: hot, warm, cold (hot = explicit buying intent or deadline). Use null for unknown fields. summary is one sentence.' }, { role: 'user', content: ($json.text || $json.snippet || '') } ] }) }}",
+        "options": {}
+      },
+      "id": "n2",
+      "name": "Extract lead with GPT",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the model output defensively: the workflow must never\n// write garbage rows into the CRM sheet.\nconst raw = $input.first().json;\nconst content = raw.choices?.[0]?.message?.content;\nif (!content) {\n  throw new Error('No content returned by the model: ' + JSON.stringify(raw).slice(0, 300));\n}\nlet lead;\ntry {\n  lead = JSON.parse(content);\n} catch (e) {\n  throw new Error('Model did not return valid JSON: ' + content.slice(0, 300));\n}\nconst allowed = ['hot', 'warm', 'cold'];\nif (!allowed.includes(lead.priority)) lead.priority = 'warm';\nlead.received_at = new Date().toISOString();\nlead.source = 'email';\nreturn [{ json: lead }];"
+      },
+      "id": "n3",
+      "name": "Parse & validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.priority }}",
+              "rightValue": "hot",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "n4",
+      "name": "Hot lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [720, 0]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "mode": "name", "value": "#sales" },
+        "text": "={{ '🔥 Hot lead: ' + ($json.name || 'Unknown') + ' (' + ($json.company || 'no company') + ')\\nIntent: ' + ($json.intent || '-') + '\\nBudget: ' + ($json.budget || '-') + '\\n' + ($json.summary || '') }}",
+        "otherOptions": {}
+      },
+      "id": "n5",
+      "name": "Alert sales on Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [960, -120]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "mode": "list", "value": "" },
+        "sheetName": { "__rl": true, "mode": "list", "value": "" },
+        "columns": { "mappingMode": "autoMapInputData", "value": {}, "matchingColumns": [] },
+        "options": {}
+      },
+      "id": "n6",
+      "name": "Append to Leads sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1200, 0]
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": { "main": [[{ "node": "Extract lead with GPT", "type": "main", "index": 0 }]] },
+    "Extract lead with GPT": { "main": [[{ "node": "Parse & validate", "type": "main", "index": 0 }]] },
+    "Parse & validate": { "main": [[{ "node": "Hot lead?", "type": "main", "index": 0 }]] },
+    "Hot lead?": {
+      "main": [
+        [{ "node": "Alert sales on Slack", "type": "main", "index": 0 }],
+        [{ "node": "Append to Leads sheet", "type": "main", "index": 0 }]
+      ]
+    },
+    "Alert sales on Slack": { "main": [[{ "node": "Append to Leads sheet", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}
